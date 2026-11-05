@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Пакман на двоих</title>
+<style>
+  html,body{margin:0;height:100%;background:#04050d;color:#fff;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden}
+  #wrap{display:flex;align-items:center;justify-content:center;height:100%}
+  canvas{max-width:100vw;max-height:100vh;display:block}
+  #ov{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(2,3,12,.82)}
+  #ov.hide{display:none}
+  .card{max-width:560px;margin:16px;padding:26px 30px;border:2px solid #3f6dff;border-radius:18px;background:#0a0f2e;box-shadow:0 0 40px #3f6dff55;text-align:center}
+  h1{margin:0 0 4px;font-size:34px;letter-spacing:2px;color:#ffd23f;text-shadow:0 0 14px #ffd23f88}
+  .sub{color:#9fb4ff;margin-bottom:16px}
+  .rules{text-align:left;font-size:15px;line-height:1.55;color:#dfe6ff}
+  .rules b{color:#fff}
+  .keys{display:flex;gap:14px;justify-content:center;margin:16px 0}
+  .keys div{padding:10px 14px;border-radius:12px;background:#121a4a;font-size:14px}
+  .go{margin-top:14px;font-size:18px;color:#ffd23f;animation:bl 1.2s infinite}
+  @keyframes bl{50%{opacity:.35}}
+  .warn{margin-top:12px;font-size:12px;color:#ff9a9a;text-align:left}
+  .win{font-size:26px;margin:6px 0 12px}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+<div id="ov"><div class="card" id="card"></div></div>
+<script>
+// ================== НАСТРОЙКИ: имена и картинки ==================
+// Картинки кладутся в папку img/ рядом с index.html (лучше квадратные, лицо по центру).
+// Если файла нет — нарисуется цветная заглушка с буквой.
+const CONFIG = {
+  players: [
+    { name:'Хазин',  img:'img/hazin.png',   color:'#ffd23f', keys:{KeyW:'up',KeyS:'down',KeyA:'left',KeyD:'right'} },
+    { name:'Пучков', img:'img/puchkov.png', color:'#4fd1ff', keys:{ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right'} },
+  ],
+  politicians: [
+    { name:'Трамп',     img:'img/trump.png',    color:'#ff8a3d' },
+    { name:'Политик 2', img:'img/politik2.png', color:'#ff4f9a' },
+    { name:'Политик 3', img:'img/politik3.png', color:'#8cff5a' },
+    { name:'Политик 4', img:'img/politik4.png', color:'#c38bff' },
+  ],
+  ghost: { name:'Контур', img:'img/kontur.png' },
+  lives: 3,
+  powerTime: 8,        // сек. действия «силы»
+  powerRespawn: 20,    // через сколько сек. большая точка появляется снова
+};
+// ================================================================
+
+const T = 32, HUD = 64;
+const MAP = [
+"###################",
+"#........#........#",
+"#o##.###.#.###.##o#",
+"#.................#",
+"#.##.#.#####.#.##.#",
+"#....#...#...#....#",
+"####.### # ###.####",
+"####.#       #.####",
+"####.# ##-## #.####",
+"    .  #   #  .    ",
+"####.# ##### #.####",
+"####.#       #.####",
+"####.# ##### #.####",
+"#........#........#",
+"#.##.###.#.###.##.#",
+"#o.#...........#.o#",
+"##.#.#.#####.#.#.##",
+"#....#...#...#....#",
+"#.######.#.######.#",
+"#.................#",
+"###################"];
+const H = MAP.length, W = MAP[0].length;
+const DV = {up:[0,-1],down:[0,1],left:[-1,0],right:[1,0]};
+const OPP = {up:'down',down:'up',left:'right',right:'left'};
+const DANG = {right:0,down:Math.PI/2,left:Math.PI,up:-Math.PI/2};
+const DIRS = ['up','left','down','right'];
+const HOUSE = {x:9,y:9}, EXIT = {x:9,y:7};
+const SPAWN = [{x:7,y:15},{x:11,y:15}];
+const PSTART = [{x:1,y:1},{x:17,y:1},{x:1,y:19},{x:17,y:19}];
+
+const cv = document.getElementById('c');
+cv.width = W*T; cv.height = H*T + HUD;
+const ctx = cv.getContext('2d');
+const ov = document.getElementById('ov'), card = document.getElementById('card');
+
+// ---------- картинки ----------
+const missing = [];
+function loadImg(src){
+  const im = new Image(); im.ok = false;
+  im.onload = () => { im.ok = true; };
+  im.onerror = () => { missing.push(src); if (state==='menu') showMenu(); };
+  im.src = src; return im;
+}
+const IMG = {
+  p: CONFIG.players.map(c => loadImg(c.img)),
+  pol: CONFIG.politicians.map(c => loadImg(c.img)),
+  ghost: loadImg(CONFIG.ghost.img),
+};
+
+// ---------- звук ----------
+let AC = null;
+function audioOn(){ if (!AC) { try { AC = new (window.AudioContext||window.webkitAudioContext)(); } catch(e){} } if (AC && AC.state==='suspended') AC.resume(); }
+function beep(f, dur, type='square', vol=.04, slide=0){
+  if (!AC) return;
+  const t = AC.currentTime, o = AC.createOscillator(), g = AC.createGain();
+  o.type = type; o.frequency.setValueAtTime(f, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(slide, t+dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+  o.connect(g).connect(AC.destination); o.start(t); o.stop(t+dur+.02);
+}
+let wakaT = 0, wakaHi = false;
+function waka(){ if (time - wakaT < .07) return; wakaT = time; wakaHi = !wakaHi; beep(wakaHi?520:380, .06, 'triangle', .035); }
+
+// ---------- поле ----------
+const wrapX = x => (x % W + W) % W;
+function tileAt(x,y){ if (y<0 || y>=H) return '#'; return MAP[y][wrapX(x)]; }
+function passable(e,x,y){
+  const c = tileAt(x,y);
+  if (c==='#') return false;
+  if (c==='-') return !!e.npc && (e.mode==='exit' || e.mode==='home');
+  return true;
+}
+function canGo(e,d){ const v = DV[d]; return passable(e, e.x+v[0], e.y+v[1]); }
+
+// заранее рисуем стены
+const wallCv = document.createElement('canvas'); wallCv.width = W*T; wallCv.height = H*T;
+(function drawWalls(){
+  const w = wallCv.getContext('2d');
+  const isW = (x,y) => { const c = tileAt(x,y); return c==='#'||c==='-'; };
+  for (let y=0;y<H;y++) for (let x=0;x<W;x++){
+    if (MAP[y][x]!=='#') continue;
+    w.fillStyle = '#0a1248'; w.fillRect(x*T, y*T, T, T);
+  }
+  w.strokeStyle = '#4a7bff'; w.lineWidth = 2.5; w.lineCap = 'round';
+  w.shadowColor = '#4a7bff'; w.shadowBlur = 8;
+  w.beginPath();
+  for (let y=0;y<H;y++) for (let x=0;x<W;x++){
+    if (MAP[y][x]!=='#') continue;
+    const X = x*T, Y = y*T, i = 3;
+    if (!isW(x,y-1)) { w.moveTo(X+(isW(x-1,y)?0:i), Y+i); w.lineTo(X+T-(isW(x+1,y)?0:i), Y+i); }
+    if (!isW(x,y+1)) { w.moveTo(X+(isW(x-1,y)?0:i), Y+T-i); w.lineTo(X+T-(isW(x+1,y)?0:i), Y+T-i); }
+    if (!isW(x-1,y)) { w.moveTo(X+i, Y+(isW(x,y-1)?0:i)); w.lineTo(X+i, Y+T-(isW(x,y+1)?0:i)); }
+    if (!isW(x+1,y)) { w.moveTo(X+T-i, Y+(isW(x,y-1)?0:i)); w.lineTo(X+T-i, Y+T-(isW(x,y+1)?0:i)); }
+  }
+  w.stroke();
+  w.shadowBlur = 0; w.fillStyle = '#ff8ad8';
+  for (let y=0;y<H;y++) for (let x=0;x<W;x++) if (MAP[y][x]==='-') w.fillRect(x*T, y*T+T/2-3, T, 6);
+})();
+
+// ---------- состояние ----------
+let state = 'menu', time = 0, dots, dotsLeft, powerSpots, players, pols, ghost, texts, pvpCool, endMsg = '';
+
+function reset(){
+  time = 0; texts = []; pvpCool = 0;
+  dots = MAP.map(r => [...r].map(c => c==='.' ? 1 : c==='o' ? 2 : 0));
+  dotsLeft = 0; powerSpots = [];
+  MAP.forEach((r,y) => [...r].forEach((c,x) => { if (c==='.') dotsLeft++; if (c==='o') powerSpots.push({x,y,t:0}); }));
+  players = CONFIG.players.map((c,i) => ({
+    i, cfg:c, img:IMG.p[i], x:SPAWN[i].x, y:SPAWN[i].y, d:null, want:null, prog:0,
+    face: i ? 'left' : 'right', score:0, lives:CONFIG.lives, power:0, inv:1.5, dead:0, mouth:0,
+  }));
+  pols = CONFIG.politicians.map((c,i) => {
+    const s = PSTART[i] || HOUSE;
+    return { npc:true, kind:'pol', cfg:c, img:IMG.pol[i], x:s.x, y:s.y, d:null, prog:0,
+             mode: PSTART[i] ? 'normal' : 'house', timer: 3 + i, caught:0 };
+  });
+  ghost = { npc:true, kind:'ghost', x:HOUSE.x, y:HOUSE.y, d:null, prog:0, mode:'house', timer:3, fright:false, eaten:0 };
+}
+
+const alive = p => p.lives > 0 && p.dead <= 0;
+function pos(e){ if (!e.d) return [e.x, e.y]; const v = DV[e.d]; return [e.x + v[0]*e.prog, e.y + v[1]*e.prog]; }
+function near(a,b,r){
+  const A = pos(a), B = pos(b);
+  let dx = Math.abs(A[0]-B[0]); dx = Math.min(dx, W-dx);
+  const dy = A[1]-B[1]; return dx*dx + dy*dy < r*r;
+}
+function dist2(ax,ay,bx,by){ let dx = Math.abs(ax-bx); dx = Math.min(dx, W-dx); const dy = ay-by; return dx*dx+dy*dy; }
+function reverse(e){ const v = DV[e.d]; e.x = wrapX(e.x+v[0]); e.y += v[1]; e.d = OPP[e.d]; e.prog = 1 - e.prog; }
+function nearestPlayer(e){
+  let best = null, bd = 1e9;
+  for (const p of players) if (alive(p)) { const d = dist2(e.x,e.y,p.x,p.y); if (d < bd) { bd = d; best = p; } }
+  return best ? {p:best, d:bd} : null;
+}
+function addText(x,y,s,color){ texts.push({x,y,s,color,t:0}); }
+
+// ---------- движение ----------
+function step(e, dist){
+  let guard = 0;
+  while (dist > 0 && guard++ < 10){
+    if (!e.d){ decide(e); if (!e.d) return; }
+    const need = 1 - e.prog;
+    if (dist < need){ e.prog += dist; return; }
+    dist -= need; e.prog = 0;
+    const v = DV[e.d]; e.x = wrapX(e.x + v[0]); e.y += v[1];
+    onTile(e);
+    if (e.mode==='house') { e.d = null; return; }
+    decide(e);
+  }
+}
+function decide(e){ e.npc ? decideNPC(e) : decidePlayer(e); }
+function decidePlayer(p){
+  if (p.want && canGo(p, p.want)) p.d = p.want;
+  else if (p.d && canGo(p, p.d)) {}
+  else p.d = null;
+  if (p.d) p.face = p.d;
+}
+function decideNPC(e){
+  const opts = DIRS.filter(d => canGo(e,d));
+  if (!opts.length){ e.d = null; return; }
+  let cand = e.d ? opts.filter(d => d !== OPP[e.d]) : opts;
+  if (!cand.length) cand = opts;
+  let target = null, flee = false, rnd = 0;
+  if (e.mode==='exit') target = EXIT;
+  else if (e.mode==='home') target = HOUSE;
+  else {
+    const np = nearestPlayer(e);
+    if (np){
+      target = np.p;
+      if (e.kind==='pol'){ flee = true; rnd = np.d < 64 ? .18 : .55; }
+      else if (np.p.power > 0){ flee = true; rnd = .2; }
+      else rnd = .1;
+    }
+  }
+  if (!target || Math.random() < rnd){ e.d = cand[Math.random()*cand.length|0]; return; }
+  let best = cand[0], bs = flee ? -1 : 1e9;
+  for (const d of cand){
+    const v = DV[d], dd = dist2(e.x+v[0], e.y+v[1], target.x, target.y);
+    if (flee ? dd > bs : dd < bs){ bs = dd; best = d; }
+  }
+  e.d = best;
+}
+function onTile(e){
+  if (e.npc){
+    if (e.mode==='exit' && e.x===EXIT.x && e.y===EXIT.y) e.mode = 'normal';
+    else if (e.mode==='home' && e.x===HOUSE.x && e.y===HOUSE.y){ e.mode = 'house'; e.timer = e.kind==='ghost' ? 2 : 4; }
+    return;
+  }
+  const c = dots[e.y][e.x];
+  if (c===1){ dots[e.y][e.x] = 0; dotsLeft--; e.score += 10; waka(); }
+  else if (c===2){
+    dots[e.y][e.x] = 0; e.score += 50; e.power = CONFIG.powerTime;
+    const s = powerSpots.find(s => s.x===e.x && s.y===e.y); if (s) s.t = CONFIG.powerRespawn;
+    addText(e.x, e.y, 'СИЛА!', e.cfg.color);
+    beep(200, .35, 'sawtooth', .05, 800);
+  }
+}
+function speedOf(e){
+  if (!e.npc) return e.power > 0 ? 6.9 : 6.2;
+  if (e.mode==='home') return 14;
+  if (e.mode==='exit') return 4;
+  if (e.kind==='pol') return tileAt(e.x,e.y)===' ' && e.y===9 ? 3.8 : 5.0;
+  if (e.fright) return 3.9;
+  return 5.2 + Math.min(1.3, time/70);
+}
+
+// ---------- события ----------
+function killPlayer(p, by){
+  p.lives--; p.dead = 1.3; p.deadPos = pos(p); p.power = 0;
+  const [x,y] = p.deadPos;
+  addText(x, y, by ? `${by.cfg.name} съел ${p.cfg.name}!` : `${p.cfg.name} пойман Контуром!`, by ? by.cfg.color : '#bdf4ff');
+  beep(700, .9, 'square', .05, 60);
+}
+function respawn(p){
+  if (p.lives <= 0) return;
+  p.x = SPAWN[p.i].x; p.y = SPAWN[p.i].y; p.d = null; p.want = null; p.prog = 0; p.inv = 2.5; p.power = 0;
+}
+
+function update(dt){
+  time += dt;
+  pvpCool = Math.max(0, pvpCool - dt);
+  for (const s of powerSpots) if (s.t > 0){ s.t -= dt; if (s.t <= 0 && !dots[s.y][s.x]) dots[s.y][s.x] = 2; }
+
+  for (const p of players){
+    if (p.lives <= 0 && p.dead <= 0) continue;
+    if (p.dead > 0){ p.dead -= dt; if (p.dead <= 0) respawn(p); continue; }
+    p.power = Math.max(0, p.power - dt); p.inv = Math.max(0, p.inv - dt);
+    if (p.d && p.want === OPP[p.d] && p.prog > 0) reverse(p);
+    step(p, speedOf(p) * dt);
+    if (p.d) p.mouth += dt * 14;
+  }
+
+  const np = nearestPlayer(ghost);
+  ghost.fright = !!(np && np.p.power > 0) && ghost.mode !== 'home';
+  for (const n of [...pols, ghost]){
+    if (n.mode==='house'){ n.timer -= dt; if (n.timer > 0) continue; n.mode = 'exit'; }
+    step(n, speedOf(n) * dt);
+  }
+
+  // столкновения
+  for (const p of players){
+    if (!alive(p)) continue;
+    for (const pol of pols){
+      if ((pol.mode==='normal' || pol.mode==='exit') && near(p, pol, .72)){
+        p.score += 200; pol.mode = 'home'; pol.caught = 1;
+        addText(pol.x, pol.y, `+200 ${pol.cfg.name} пойман!`, p.cfg.color);
+        beep(900, .18, 'square', .045, 1500);
+      }
+    }
+    if ((ghost.mode==='normal' || ghost.mode==='exit') && p.inv <= 0 && near(p, ghost, .7)){
+      if (p.power > 0){
+        p.score += 300; ghost.mode = 'home';
+        addText(ghost.x, ghost.y, `+300 Контур разорван!`, p.cfg.color);
+        beep(300, .4, 'sawtooth', .05, 1200);
+      } else killPlayer(p, null);
+    }
+  }
+  const [a, b] = players;
+  if (alive(a) && alive(b) && a.inv <= 0 && b.inv <= 0 && pvpCool <= 0 && near(a, b, .78)){
+    const ap = a.power > 0, bp = b.power > 0;
+    if (ap && !bp){ a.score += 500; killPlayer(b, a); }
+    else if (bp && !ap){ b.score += 500; killPlayer(a, b); }
+    else {
+      for (const p of [a,b]) if (p.d && p.prog > 0) { reverse(p); p.want = p.d; }
+      pvpCool = .35; beep(150, .12, 'square', .04);
+    }
+  }
+
+  for (const t of texts) t.t += dt;
+  texts = texts.filter(t => t.t < 1.6);
+
+  // конец игры
+  const out = players.find(p => p.lives <= 0 && p.dead <= 0);
+  if (out){
+    const win = players.find(p => p !== out);
+    finish(`${out.cfg.name} выбыл — все жизни потеряны.`, win);
+  } else if (dotsLeft <= 0){
+    const win = a.score === b.score ? null : (a.score > b.score ? a : b);
+    finish('Все точки съедены!', win);
+  }
+}
+
+function finish(reason, win){
+  state = 'over';
+  const [a,b] = players;
+  card.innerHTML = `<h1>ИГРА ОКОНЧЕНА</h1>
+    <div class="sub">${reason}</div>
+    <div class="win" style="color:${win ? win.cfg.color : '#fff'}">${win ? 'Победил ' + win.cfg.name + '!' : 'Ничья!'}</div>
+    <div class="keys"><div style="color:${a.cfg.color}">${a.cfg.name}: <b>${a.score}</b></div><div style="color:${b.cfg.color}">${b.cfg.name}: <b>${b.score}</b></div></div>
+    <div class="go">Пробел — ещё раз</div>`;
+  ov.classList.remove('hide');
+  beep(400, .6, 'triangle', .05, 200);
+}
+
+// ---------- отрисовка ----------
+function drawCover(img, x, y, w, h){
+  const s = Math.max(w/img.naturalWidth, h/img.naturalHeight);
+  const iw = img.naturalWidth*s, ih = img.naturalHeight*s;
+  ctx.drawImage(img, x+(w-iw)/2, y+(h-ih)/2, iw, ih);
+}
+function faceFill(img, cx, cy, r, color, name){
+  if (img && img.ok) drawCover(img, cx-r, cy-r, 2*r, 2*r);
+  else {
+    ctx.fillStyle = color; ctx.fillRect(cx-r, cy-r, 2*r, 2*r);
+    ctx.fillStyle = '#0a0a18'; ctx.font = `bold ${r*1.05|0}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(name[0], cx, cy+1);
+  }
+}
+const scr = (x,y) => [(x+.5)*T, (y+.5)*T + HUD];
+
+function drawPlayer(p){
+  if (p.lives <= 0 && p.dead <= 0) return;
+  let x, y, mouth, ang = DANG[p.face], r = T*.62;
+  if (p.dead > 0){
+    [x,y] = p.deadPos; const k = 1 - p.dead/1.3;
+    mouth = .2 + k*Math.PI*.95; ang = -Math.PI/2; r *= 1 - k*.5;
+  } else {
+    [x,y] = pos(p);
+    mouth = p.d ? (Math.sin(p.mouth)*.5 + .5) * .75 + .05 : .3;
+  }
+  const [cx, cy] = scr(x,y);
+  ctx.save();
+  if (p.inv > 0 && p.dead <= 0 && Math.floor(time*10)%2) ctx.globalAlpha = .35;
+  const path = () => { ctx.beginPath(); ctx.moveTo(cx,cy); ctx.arc(cx, cy, r, ang+mouth, ang+Math.PI*2-mouth); ctx.closePath(); };
+  if (p.power > 0){ ctx.shadowColor = p.cfg.color; ctx.shadowBlur = 22; ctx.fillStyle = p.cfg.color; path(); ctx.fill(); ctx.shadowBlur = 0; }
+  ctx.save(); path(); ctx.clip(); faceFill(p.img, cx, cy, r, p.cfg.color, p.cfg.name); ctx.restore();
+  path(); ctx.lineWidth = 3;
+  ctx.strokeStyle = p.power > 0 && (p.power > 2 || Math.floor(time*8)%2) ? '#fff' : p.cfg.color; ctx.stroke();
+  ctx.restore();
+}
+
+function drawPol(e){
+  const [x,y] = pos(e), [cx,cy] = scr(x,y);
+  if (e.mode==='house' && e.caught){ // сидит «в участке»
+    ctx.save(); ctx.globalAlpha = .55;
+  } else ctx.save();
+  let r = T*.52;
+  if (e.mode==='home'){ ctx.globalAlpha = .4; r *= .6; }
+  const bob = e.mode==='house' ? Math.sin(time*5 + e.cfg.name.length)*3 : 0;
+  ctx.beginPath(); ctx.arc(cx, cy+bob, r, 0, Math.PI*2); ctx.save(); ctx.clip();
+  faceFill(e.img, cx, cy+bob, r, e.cfg.color, e.cfg.name); ctx.restore();
+  ctx.lineWidth = 3; ctx.strokeStyle = e.cfg.color; ctx.stroke();
+  if (e.mode !== 'home'){
+    ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.lineWidth = 3; ctx.strokeStyle = '#000'; ctx.strokeText(e.cfg.name, cx, cy+bob+r+1);
+    ctx.fillStyle = e.cfg.color; ctx.fillText(e.cfg.name, cx, cy+bob+r+1);
+  }
+  ctx.restore();
+}
+
+function ghostPath(cx, cy, r){
+  const top = cy - r*.1, bottom = cy + r*.9, n = 6, ph = Math.floor(time*6)%2;
+  ctx.beginPath(); ctx.arc(cx, top, r, Math.PI, 0); ctx.lineTo(cx+r, bottom);
+  for (let k=1;k<=n;k++) ctx.lineTo(cx + r - k*(2*r/n), bottom - (((k+ph)%2) ? r*.28 : 0));
+  ctx.closePath();
+}
+function drawGhost(){
+  const g = ghost, [x,y] = pos(g), [cx,cy] = scr(x,y), r = T*.55;
+  ctx.save();
+  const np = nearestPlayer(g);
+  const blink = g.fright && np && np.p.power < 2 && Math.floor(time*8)%2;
+  if (g.mode !== 'home'){
+    ghostPath(cx, cy, r);
+    ctx.fillStyle = g.fright ? 'rgba(60,90,255,.22)' : 'rgba(140,230,255,.08)'; ctx.fill();
+    if (IMG.ghost.ok){ ctx.save(); ghostPath(cx,cy,r); ctx.clip(); ctx.globalAlpha = .85; drawCover(IMG.ghost, cx-r, cy-r*1.1, 2*r, 2*r); ctx.restore(); }
+    ctx.lineWidth = 3;
+    ctx.shadowBlur = 14;
+    if (g.fright){ ctx.setLineDash([5,4]); ctx.strokeStyle = blink ? '#fff' : '#5b7bff'; ctx.shadowColor = '#5b7bff'; }
+    else { ctx.strokeStyle = '#e8fbff'; ctx.shadowColor = '#7fe7ff'; }
+    ghostPath(cx, cy, r); ctx.stroke(); ctx.setLineDash([]); ctx.shadowBlur = 0;
+  }
+  // глаза
+  const v = DV[g.d || 'down'];
+  for (const s of [-1,1]){
+    const ex = cx + s*r*.38, ey = cy - r*.2;
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.ellipse(ex, ey, r*.22, r*.28, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = g.fright ? '#5b7bff' : '#1a2bd6'; ctx.beginPath(); ctx.arc(ex + v[0]*r*.1, ey + v[1]*r*.12, r*.11, 0, Math.PI*2); ctx.fill();
+  }
+  if (g.mode !== 'home'){
+    ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.lineWidth = 3; ctx.strokeStyle = '#000'; ctx.strokeText(CONFIG.ghost.name, cx, cy + r + 1);
+    ctx.fillStyle = '#bdf4ff'; ctx.fillText(CONFIG.ghost.name, cx, cy + r + 1);
+  }
+  ctx.restore();
+}
+
+function drawHUD(){
+  ctx.fillStyle = '#070a22'; ctx.fillRect(0, 0, cv.width, HUD);
+  ctx.fillStyle = '#4a7bff'; ctx.fillRect(0, HUD-2, cv.width, 2);
+  players.forEach((p, i) => {
+    const right = i === 1, fx = right ? cv.width - 34 : 34, fy = 32;
+    ctx.save(); ctx.beginPath(); ctx.arc(fx, fy, 22, 0, Math.PI*2); ctx.clip(); faceFill(p.img, fx, fy, 22, p.cfg.color, p.cfg.name); ctx.restore();
+    ctx.beginPath(); ctx.arc(fx, fy, 22, 0, Math.PI*2); ctx.lineWidth = 3; ctx.strokeStyle = p.cfg.color; ctx.stroke();
+    const tx = right ? cv.width - 66 : 66;
+    ctx.textAlign = right ? 'right' : 'left'; ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = p.cfg.color; ctx.font = 'bold 15px system-ui'; ctx.fillText(p.cfg.name, tx, 22);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 22px system-ui'; ctx.fillText(p.score, tx, 46);
+    ctx.font = '15px system-ui'; ctx.fillStyle = '#ff5a6e';
+    const hearts = '♥'.repeat(Math.max(0, p.lives)) + '♡'.repeat(Math.max(0, CONFIG.lives - p.lives));
+    ctx.font = 'bold 22px system-ui'; const sw2 = ctx.measureText(String(p.score)).width;
+    ctx.font = '15px system-ui';
+    ctx.fillText(hearts, right ? tx - sw2 - 12 : tx + sw2 + 12, 45);
+    if (p.power > 0){
+      const bw = 120 * p.power / CONFIG.powerTime;
+      ctx.fillStyle = p.cfg.color; ctx.fillRect(right ? tx - bw : tx, 53, bw, 4);
+    }
+  });
+  ctx.textAlign = 'center'; ctx.fillStyle = '#9fb4ff'; ctx.font = '12px system-ui';
+  ctx.fillText('точек', cv.width/2, 22);
+  ctx.fillStyle = '#ffd9a8'; ctx.font = 'bold 20px system-ui'; ctx.fillText(dotsLeft, cv.width/2, 46);
+}
+
+function draw(){
+  ctx.fillStyle = '#04050d'; ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.drawImage(wallCv, 0, HUD);
+  // точки
+  for (let y=0;y<H;y++) for (let x=0;x<W;x++){
+    const c = dots[y][x]; if (!c) continue;
+    const [cx,cy] = scr(x,y);
+    if (c===1){ ctx.fillStyle = '#ffd9a8'; ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI*2); ctx.fill(); }
+    else { const r = 7 + Math.sin(time*6)*1.8; ctx.fillStyle = '#fff3c4'; ctx.shadowColor = '#ffd23f'; ctx.shadowBlur = 14; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.fill(); ctx.shadowBlur = 0; }
+  }
+  for (const e of pols) drawPol(e);
+  drawGhost();
+  for (const p of players) drawPlayer(p);
+  // всплывающие надписи
+  for (const t of texts){
+    const [cx,cy] = scr(t.x, t.y);
+    ctx.save(); ctx.globalAlpha = Math.max(0, 1 - t.t/1.6);
+    ctx.font = 'bold 14px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const tx = Math.min(cv.width - 90, Math.max(90, cx)), ty = cy - 14 - t.t*26;
+    ctx.lineWidth = 4; ctx.strokeStyle = '#000'; ctx.strokeText(t.s, tx, ty);
+    ctx.fillStyle = t.color; ctx.fillText(t.s, tx, ty); ctx.restore();
+  }
+  drawHUD();
+  if (state==='pause'){
+    ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(0, HUD, cv.width, cv.height-HUD);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 32px system-ui'; ctx.textAlign = 'center'; ctx.fillText('ПАУЗА', cv.width/2, cv.height/2);
+    ctx.font = '15px system-ui'; ctx.fillText('P или Esc — продолжить', cv.width/2, cv.height/2 + 28);
+  }
+}
+
+// ---------- меню ----------
+function showMenu(){
+  const [p1, p2] = CONFIG.players;
+  card.innerHTML = `<h1>ПАКМАН НА ДВОИХ</h1>
+    <div class="sub">${p1.name} против ${p2.name}: кто поймает больше политиков</div>
+    <div class="rules">
+      • Ешьте точки (+10) и ловите политиков — <b>${CONFIG.politicians.map(p=>p.name).join(', ')}</b> (+200). Они убегают и потом снова выходят из «домика».<br>
+      • <b>Контур</b> — дух-обводка, охотится на вас. Коснулся — минус жизнь.<br>
+      • Большая точка даёт <b>СИЛУ</b> на ${CONFIG.powerTime} с: можно разорвать Контур (+300) и <b>съесть соперника</b> (+500, он теряет жизнь).<br>
+      • Без силы игроки отскакивают друг от друга. Большие точки снова появляются через ${CONFIG.powerRespawn} с.<br>
+      • Потерял все ${CONFIG.lives} жизни — проиграл. Съели все точки — побеждает тот, у кого больше очков.
+    </div>
+    <div class="keys"><div style="color:${p1.color}"><b>${p1.name}</b>: W A S D</div><div style="color:${p2.color}"><b>${p2.name}</b>: стрелки</div></div>
+    <div class="go">Пробел или Enter — старт</div>
+    ${missing.length ? `<div class="warn">Нет картинок (рисуются заглушки): ${missing.join(', ')}</div>` : ''}`;
+  ov.classList.remove('hide');
+}
+function start(){ reset(); state = 'play'; ov.classList.add('hide'); audioOn(); beep(500,.12,'square',.04,900); }
+
+addEventListener('keydown', e => {
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
+  if ((e.code==='Space' || e.code==='Enter') && (state==='menu' || state==='over')) { start(); return; }
+  if ((e.code==='KeyP' || e.code==='Escape') && (state==='play' || state==='pause')) { state = state==='play' ? 'pause' : 'play'; return; }
+  if (state !== 'play') return;
+  for (const p of players){ const d = p.cfg.keys[e.code]; if (d) p.want = d; }
+});
+addEventListener('blur', () => { if (state==='play') state = 'pause'; });
+
+let last = performance.now();
+function loop(now){
+  const dt = Math.min(.05, (now - last)/1000); last = now;
+  if (state==='play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+reset(); showMenu(); requestAnimationFrame(loop);
+</script>
+</body>
+</html>
