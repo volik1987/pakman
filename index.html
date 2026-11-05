@@ -32,8 +32,8 @@
 // Если файла нет — нарисуется цветная заглушка с буквой.
 const CONFIG = {
   players: [
-    { name:'Хазин',  img:'img/hazin.png',   color:'#ffd23f', keys:{KeyW:'up',KeyS:'down',KeyA:'left',KeyD:'right'} },
-    { name:'Пучков', img:'img/puchkov.png', color:'#4fd1ff', keys:{ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right'} },
+    { name:'Пакман 1', short:'1', img:'img/pakman1.png', color:'#ffd23f', keys:{KeyW:'up',KeyS:'down',KeyA:'left',KeyD:'right'} },
+    { name:'Пакман 2', short:'2', img:'img/pakman2.png', color:'#4fd1ff', keys:{ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right'} },
   ],
   politicians: [
     { name:'Трамп',     img:'img/trump.png',    color:'#ff8a3d' },
@@ -354,7 +354,7 @@ function faceFill(img, cx, cy, r, color, name){
   else {
     ctx.fillStyle = color; ctx.fillRect(cx-r, cy-r, 2*r, 2*r);
     ctx.fillStyle = '#0a0a18'; ctx.font = `bold ${r*1.05|0}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(name[0], cx, cy+1);
+    ctx.fillText((CONFIG.players.find(p => p.name===name) || {}).short || name[0], cx, cy+1);
   }
 }
 const scr = (x,y) => [(x+.5)*T, (y+.5)*T + HUD];
